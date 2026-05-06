@@ -1,6 +1,6 @@
 import type { WSMessage } from '../../api/websocket';
 import type { PanelTab } from '../../types/chat';
-import { applyStreamEvent, rebuildPanelTabsFromBuffer, deriveStatus } from '../helpers/bufferReplay';
+import { applyStreamEvent, rebuildPanelTabsFromBuffer, deriveStatus, extractTodosFromBuffer } from '../helpers/bufferReplay';
 import type { Get, Set } from './types';
 
 // ------------------------------------------------------------------ //
@@ -89,7 +89,13 @@ export function handleSessionStatus(
       }
     }
 
-    set({
+    // Restore todos panel from the freshest TodoWrite in the buffer. Without
+    // this, a client that reconnects mid-turn (page refresh, WS drop, tab
+    // backgrounded) sees a stale snapshot from persisted history because the
+    // buffered TodoWrite tool_use events fed only streamingBlocks.
+    const restoredTodos = extractTodosFromBuffer(bufferedEvents);
+
+    const update: Record<string, unknown> = {
       isStreaming: true,
       streamingBlocks: blocks,
       agentStatus: deriveStatus(blocks),
@@ -97,7 +103,11 @@ export function handleSessionStatus(
       activePanelId: restored.activePanelId,
       panelVisible: restored.panels.length > 0,
       pendingInteraction: restoredInteraction,
-    });
+    };
+    if (restoredTodos !== null) {
+      update.currentTodos = restoredTodos;
+    }
+    set(update);
   } else {
     set({ isStreaming: true, streamingBlocks: blocks, agentStatus: deriveStatus(blocks) });
   }
