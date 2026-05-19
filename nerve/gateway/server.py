@@ -26,6 +26,7 @@ from nerve.config import NerveConfig, get_config
 from nerve.db import Database, init_db, close_db
 from nerve.gateway.auth import authenticate_websocket
 from nerve.gateway.routes import init_deps, register_all_routes, set_notification_service
+from nerve.mcp_server import build_manager as _build_mcp_manager, mount_deferred as _mount_mcp_deferred
 from nerve.observability.langfuse import (
     flush as langfuse_flush,
     init_langfuse,
@@ -36,6 +37,10 @@ logger = logging.getLogger(__name__)
 # Global references
 _engine: AgentEngine | None = None
 _cron_service = None  # CronService
+# StreamableHTTPSessionManager assigned during lifespan when
+# config.mcp_endpoint.enabled. The /mcp/v1 mount handler reads it; until
+# lifespan finishes building it, the mount returns 503.
+_mcp_manager = None
 
 # Memorization sweep stats (updated by background task, read by diagnostics)
 _memorize_stats: dict = {
@@ -82,7 +87,7 @@ async def _send_session_status(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan — initialize DB, engine, channels on startup."""
-    global _engine
+    global _engine, _mcp_manager
     config = get_config()
 
     # Clear CLAUDECODE env var to prevent nested session detection by claude-agent-sdk
@@ -233,6 +238,26 @@ async def lifespan(app: FastAPI):
 
     notify_expiry_task = asyncio.create_task(_periodic_notify_expiry())
 
+    # Start the external MCP manager if enabled — its run() context
+    # owns the task group for in-flight connections. The deferred mount
+    # added in create_app() reads the manager from _mcp_manager once
+    # it's set, so the /mcp/v1 path is wired BEFORE the SPA catch-all
+    # but only becomes reachable after we enter run() below.
+    mcp_run_ctx = None
+    if config.mcp_endpoint.enabled:
+        try:
+            _mcp_manager = _build_mcp_manager(_engine, _engine.registry, config)
+            mcp_run_ctx = _mcp_manager.run()
+            await mcp_run_ctx.__aenter__()
+            logger.info(
+                "MCP endpoint live at %s (include_hoa=%s)",
+                config.mcp_endpoint.path, config.mcp_endpoint.include_hoa,
+            )
+        except Exception as e:
+            logger.error("Failed to start MCP endpoint: %s", e)
+            mcp_run_ctx = None
+            _mcp_manager = None
+
     logger.info("Nerve started on %s:%d", config.gateway.host, config.gateway.port)
 
     # Send startup notification to the user (Telegram only, silent)
@@ -248,6 +273,15 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to send startup notification: %s", e)
 
     yield
+
+    # Shutdown: stop MCP manager first so in-flight requests finish
+    # before we tear down the engine they depend on.
+    if mcp_run_ctx is not None:
+        try:
+            await mcp_run_ctx.__aexit__(None, None, None)
+        except Exception as e:
+            logger.warning("MCP manager shutdown raised: %s", e)
+        _mcp_manager = None
 
     # Shutdown: stop telegram FIRST, before cancelling background tasks.
     # Background task cancellation propagates through anyio cancel scopes
@@ -302,6 +336,12 @@ def create_app() -> FastAPI:
 
     # REST routes
     app.include_router(register_all_routes())
+
+    # External MCP endpoint (deferred mount — registers /mcp/v1 BEFORE the
+    # SPA catch-all so the path isn't shadowed; the manager itself is
+    # built in lifespan once the engine is live).
+    config = get_config()
+    _mount_mcp_deferred(app, config, lambda: _mcp_manager)
 
     # WebSocket endpoint
     @app.websocket("/ws")

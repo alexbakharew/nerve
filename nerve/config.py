@@ -435,6 +435,33 @@ class ProxyConfig:
 
 
 @dataclass
+class McpEndpointConfig:
+    """Nerve's own MCP server endpoint (Nerve-as-MCP-server).
+
+    Exposes the Nerve tool registry to external MCP clients (Codex,
+    Claude Code, Cursor) over Streamable HTTP, mounted at ``path`` inside
+    the gateway. Off by default; flip ``enabled=true`` in config.local.yaml
+    to advertise the endpoint. Authenticates with the existing JWT
+    (``config.auth.jwt_secret``) — same token mechanism as the web UI.
+
+    Not to be confused with :class:`McpServerConfig`, which configures
+    *external* MCP servers that Nerve connects to as a client.
+    """
+
+    enabled: bool = False
+    path: str = "/mcp/v1"
+    include_hoa: bool = False   # Expose HouseOfAgents tools to external clients
+
+    @classmethod
+    def from_dict(cls, d: dict) -> McpEndpointConfig:
+        return cls(
+            enabled=bool(d.get("enabled", False)),
+            path=str(d.get("path", "/mcp/v1")),
+            include_hoa=bool(d.get("include_hoa", False)),
+        )
+
+
+@dataclass
 class McpServerConfig:
     """External MCP server configuration.
 
@@ -649,6 +676,7 @@ class NerveConfig:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     houseofagents: HouseOfAgentsConfig = field(default_factory=HouseOfAgentsConfig)
     langfuse: LangfuseConfig = field(default_factory=LangfuseConfig)
+    mcp_endpoint: McpEndpointConfig = field(default_factory=McpEndpointConfig)
     mcp_servers: list[McpServerConfig] = field(default_factory=list)
 
     # API keys (from config.local.yaml)
@@ -756,6 +784,7 @@ class NerveConfig:
             proxy=ProxyConfig.from_dict(d.get("proxy", {})),
             houseofagents=HouseOfAgentsConfig.from_dict(d.get("houseofagents", {})),
             langfuse=LangfuseConfig.from_dict(d.get("langfuse", {})),
+            mcp_endpoint=McpEndpointConfig.from_dict(d.get("mcp_endpoint", {})),
             mcp_servers=_parse_mcp_servers(d),
             anthropic_api_key=d.get("anthropic_api_key", ""),
             openai_api_key=d.get("openai_api_key", ""),
