@@ -118,11 +118,16 @@ async def lifespan(app: FastAPI):
     # Wire up routes
     init_deps(_engine, db)
 
-    # Initialize notification service
+    # Initialize notification service. The engine has a setter so the
+    # per-session ``ToolContext`` constructed inside ``engine.run()``
+    # picks up the live reference. We also seed the legacy module
+    # global on ``nerve.agent.tools`` so older test fixtures that patch
+    # ``tools._notification_service`` directly continue to work.
     from nerve.notifications.service import NotificationService
     from nerve.agent import tools as agent_tools
 
     notification_service = NotificationService(config, db, _engine)
+    _engine.set_notification_service(notification_service)
     agent_tools._notification_service = notification_service
     set_notification_service(notification_service)
 
